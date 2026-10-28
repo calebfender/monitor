@@ -497,7 +497,7 @@ function drawDevs() {
   $("#devs").innerHTML = DEVICES.map(d => {
     const x = S[d.id], [st] = verdict(x), n = x.now;
     const sub = x.ok === false ? "offline" : n ? `${pct(n.cpu)} · ${gib(n.mem.used)}` : "";
-    return `<button class="dev${d.id === dev ? " on" : ""}" data-d="${d.id}" style="${st ? `--st:var(--${st})` : ""}"><i></i><b>${esc(d.name)}</b><span class="num">${sub}</span></button>`;
+    return `<button class="dev${d.id === dev ? " on" : ""}" data-d="${esc(d.id)}" style="${st ? `--st:var(--${st})` : ""}"><i></i><b>${esc(d.name)}</b><span class="num">${sub}</span></button>`;
   }).join("");
 }
 $("#devs").addEventListener("click", (e) => { const b = e.target.closest(".dev"); if (b && b.dataset.d !== dev) setDev(b.dataset.d); });

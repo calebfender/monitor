@@ -24,6 +24,8 @@ die() { printf 'monitor install: %s\n' "$*" >&2; exit 1; }
 # Single-quote one argument for a shell command line.
 quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+# Quote one argument for a systemd ExecStart line (no specifier or variable expansion).
+sdq() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g' -e 's/\$/$$/g')"; }
 
 for a in "$@"; do
   case "$a" in
@@ -81,6 +83,16 @@ mv "$DIR/monitor.new" "$DIR/monitor"
 # Check the options before they go into a service that would restart forever on a typo
 eval "set -- $ARGS"
 for a in "$@"; do case "$a" in --help | -h | --version | -V) die "$a isn't a service option" ;; esac; done
+# Where the monitor keeps its data, so the disk scan writes where it reads
+DATA="$DIR"
+PORT=8620
+prev=""
+for a in "$@"; do
+  case "$a" in --dir=*) DATA=${a#--dir=} ;; --port=*) PORT=${a#--port=} ;; esac
+  [ "$prev" = --dir ] && DATA=$a
+  [ "$prev" = --port ] && PORT=$a
+  prev=$a
+done
 
 # 2. The service
 if [ "$OS" = Darwin ]; then
@@ -98,8 +110,8 @@ if [ "$OS" = Darwin ]; then
 else
   command -v systemctl >/dev/null || die "systemd not found: run $DIR/monitor yourself (it has no other dependencies)"
   mkdir -p "$UNITS"
-  EXEC="$DIR/monitor"
-  for a in "$@"; do EXEC="$EXEC $(printf '"%s"' "$(printf '%s' "$a" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g')")"; done
+  EXEC=$(sdq "$DIR/monitor")
+  for a in "$@"; do EXEC="$EXEC $(sdq "$a")"; done
   cat > "$UNITS/monitor.service" <<EOF
 [Unit]
 Description=Monitor: live CPU, memory and per-app usage
@@ -116,7 +128,7 @@ EOF
 Description=Monitor disk scan (writes data.json for the Disk tab)
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/env python3 $DIR/scan.py --dir $DIR
+ExecStart=/usr/bin/env python3 $(sdq "$DIR/scan.py") --dir $(sdq "$DATA")
 Nice=15
 IOSchedulingClass=idle
 EOF
@@ -140,13 +152,8 @@ EOF
 fi
 
 # 3. Where it is
-PORT=8620
-prev=""
-for a in "$@"; do
-  case "$a" in --port=*) PORT=${a#--port=} ;; esac
-  [ "$prev" = --port ] && PORT=$a
-  prev=$a
-done
+SCAN="python3 $(quote "$DIR/scan.py")"
+[ "$DATA" != "$DIR" ] && SCAN="$SCAN --dir $(quote "$DATA")"
 sleep 1
 if curl -fsS "http://127.0.0.1:$PORT/api/config" >/dev/null 2>&1; then
   say "Monitor is running: http://127.0.0.1:$PORT"
@@ -155,8 +162,8 @@ else
   [ "$OS" = Darwin ] && say "Check $DIR/monitor.log" || say "Check: journalctl --user -u monitor -n 20"
 fi
 if [ "$OS" = Darwin ]; then
-  say "For the Disk tab, run this from Terminal (about 2 min): python3 $DIR/scan.py"
+  say "For the Disk tab, run this from Terminal (about 2 min): $SCAN"
   say "(macOS doesn't let background services read your home folder, so the scan can't run on a timer.)"
 else
-  say "The Disk tab fills in after the nightly scan, or now: python3 $DIR/scan.py"
+  say "The Disk tab fills in after the nightly scan, or now: $SCAN"
 fi

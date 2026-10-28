@@ -117,8 +117,8 @@ class Recs(list):
 def old_node_modules(days=30):
     """node_modules folders under home in projects untouched for `days` days."""
     out = run(["find", H, "-maxdepth", "6", "(", "-name", "Library", "-o", "-name", ".*", "-o", "-name", "snap", ")",
-               "-prune", "-o", "-type", "d", "-name", "node_modules", "-prune", "-mtime", f"+{days}", "-print"], timeout=300)
-    return [p for p in out.splitlines() if p]
+               "-prune", "-o", "-type", "d", "-name", "node_modules", "-prune", "-mtime", f"+{days}", "-print0"], timeout=300)
+    return [p for p in out.split("\0") if p]
 
 
 def mole_dry_run():
