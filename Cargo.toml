@@ -1,0 +1,16 @@
+[package]
+name = "monitor"
+description = "Live CPU, memory and per-app usage plus a disk map for macOS and Linux, in one tiny binary"
+license = "MIT"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,49 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          lipo -create -output monitor-macos target/aarch64-apple-darwin/release/monitor target/x86_64-apple-darwin/release/monitor
+          ./monitor-macos --version
+      - uses: actions/upload-artifact@v4
+        with: { name: macos, path: monitor-macos }
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add ${{ matrix.arch }}-unknown-linux-musl
+      - name: Build (static, linked with the rust-lld that ships with Rust)
+        run: |
+          export PATH="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin:$PATH"
+          T=${{ matrix.arch }}-unknown-linux-musl
+          export "CARGO_TARGET_$(echo "$T" | tr 'a-z-' 'A-Z_')_LINKER=rust-lld"
+          cargo build --release --target "$T"
+          cp "target/$T/release/monitor" monitor-linux-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with: { name: linux-${{ matrix.arch }}, path: monitor-linux-${{ matrix.arch }} }
+  publish:
+    needs: [macos, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - run: |
+          cp scan.py install.sh dist/
+          cd dist && sha256sum monitor-* scan.py > SHA256SUMS
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes

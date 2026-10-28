@@ -1,0 +1,24 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+      - name: Smoke test
+        run: |
+          ./target/release/monitor --version
+          ./target/release/monitor --port 8620 --dir "$RUNNER_TEMP/mon" &
+          sleep 5
+          curl -fsS http://127.0.0.1:8620/api/live | python3 -c 'import json,sys; assert json.load(sys.stdin)["now"]'
+          curl -fsS http://127.0.0.1:8620/api/info >/dev/null
+          curl -fsS http://127.0.0.1:8620/ | grep -q '<title>Monitor</title>'
+      - run: python3 -m py_compile scan.py
+      - run: sh -n install.sh
