@@ -18,6 +18,8 @@ The monitor is about 500 KB of Rust with one dependency (`libc`). It reads the O
 
 ## Install
 
+**Setting this up with an AI agent?** Point it at [AGENTS.md](AGENTS.md): exact install, verification, multi-machine and troubleshooting steps.
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/calebfender/monitor/main/install.sh | sh
 ```
