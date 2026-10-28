@@ -16,7 +16,9 @@ jobs:
           lipo -create -output monitor-macos target/aarch64-apple-darwin/release/monitor target/x86_64-apple-darwin/release/monitor
           ./monitor-macos --version
       - uses: actions/upload-artifact@v4
-        with: { name: macos, path: monitor-macos }
+        with:
+          name: macos
+          path: monitor-macos
   linux:
     runs-on: ubuntu-latest
     strategy:
@@ -33,14 +35,18 @@ jobs:
           cargo build --release --target "$T"
           cp "target/$T/release/monitor" monitor-linux-${{ matrix.arch }}
       - uses: actions/upload-artifact@v4
-        with: { name: linux-${{ matrix.arch }}, path: monitor-linux-${{ matrix.arch }} }
+        with:
+          name: linux-${{ matrix.arch }}
+          path: monitor-linux-${{ matrix.arch }}
   publish:
     needs: [macos, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { path: dist, merge-multiple: true }
+        with:
+          path: dist
+          merge-multiple: true
       - run: |
           cp scan.py install.sh dist/
           cd dist && sha256sum monitor-* scan.py > SHA256SUMS
