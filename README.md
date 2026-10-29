@@ -26,7 +26,7 @@ Every monitor is also an [MCP](https://modelcontextprotocol.io) server at `/mcp`
 | `history` | Last 30 min or 24 h: averages, peaks, high-pressure periods, CPU spikes and the app behind each, gaps |
 | `disk` | Free space, biggest folders (drill into any folder), cleanup suggestions with exact commands |
 | `machines` | Every machine: online, specs, whether cleanup is allowed, its MCP URL |
-| `scan_disk` | Start a fresh disk scan (read-only) |
+| `scan_disk` | Refresh the disk scan (read-only). On Linux the monitor runs it; on macOS it gives the agent the command to run in its own shell, so macOS doesn't ask for permission over and over |
 | `run_cleanup` | Run cleanup suggestions. Off unless the monitor runs with `--allow-cleanup`; always two steps: the agent gets the exact commands and a one-time code, shows you, and only runs them with the code after you approve. Never runs `sudo` |
 
 Connect it:

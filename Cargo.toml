@@ -2,7 +2,7 @@
 name = "monitor"
 description = "Live CPU, memory and per-app usage plus a disk map for macOS and Linux, in one tiny binary"
 license = "MIT"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 
 [dependencies]

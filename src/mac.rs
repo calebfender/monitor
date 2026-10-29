@@ -166,27 +166,28 @@ pub fn info() -> String {
         esc(&sysctl_str("kern.hostname")), esc(&sysctl_str("hw.model")), esc(&sysctl_str("machdep.cpu.brand_string")),
         ncpu(), sysctl::<i32>("hw.perflevel0.logicalcpu").unwrap_or(0), sysctl::<i32>("hw.perflevel1.logicalcpu").unwrap_or(0),
         sysctl::<u64>("hw.memsize").unwrap_or(0), boot.tv_sec);
-    let mut disks = vec![("Macintosh HD".to_string(), "/System/Volumes/Data".to_string())];
-    if let Ok(rd) = std::fs::read_dir("/Volumes") {
-        for e in rd.flatten() {
-            if e.file_type().map(|t| t.is_dir() && !t.is_symlink()).unwrap_or(false) {
-                disks.push((e.file_name().to_string_lossy().into_owned(), e.path().to_string_lossy().into_owned()));
-            }
-        }
-    }
-    let root_dev = std::fs::metadata("/System/Volumes/Data").map(|m| std::os::unix::fs::MetadataExt::dev(&m)).ok();
+    // Sizes come from the mount table (getmntinfo with MNT_NOWAIT), so nothing on any
+    // drive is touched: no privacy prompts for removable or network volumes.
+    let mut list: *mut libc::statfs = std::ptr::null_mut();
+    let n = unsafe { libc::getmntinfo(&mut list, libc::MNT_NOWAIT) }.max(0) as usize;
+    let mounts = if list.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(list, n) } };
+    let cstr = |b: &[libc::c_char]| unsafe { std::ffi::CStr::from_ptr(b.as_ptr()) }.to_string_lossy().into_owned();
+    let mut seen = Vec::new();
     let mut first = true;
-    for (i, (name, path)) in disks.iter().enumerate() {
-        if i > 0 && std::fs::metadata(path).map(|m| Some(std::os::unix::fs::MetadataExt::dev(&m)) == root_dev).unwrap_or(true) {
-            continue; // not a separate volume
-        }
-        if let Some((total, free)) = statvfs(path) {
-            // skip tiny volumes and other volumes of the boot container (Recovery etc. report its numbers)
-            if total < 1 << 30 || (i > 0 && Some((total, free)) == statvfs("/System/Volumes/Data")) { continue; }
-            if !first { o.push(','); }
-            first = false;
-            let _ = write!(o, "{{\"name\":{},\"total\":{},\"free\":{}}}", esc(name), total, free);
-        }
+    // the data volume first, then other drives under /Volumes
+    let mut order: Vec<&libc::statfs> = mounts.iter().filter(|m| cstr(&m.f_mntonname) == DATA_VOLUME).collect();
+    order.extend(mounts.iter().filter(|m| cstr(&m.f_mntonname).starts_with("/Volumes/") && m.f_flags & libc::MNT_DONTBROWSE as u32 == 0));
+    for m in order {
+        let total = m.f_blocks * m.f_bsize as u64;
+        let free = m.f_bavail * m.f_bsize as u64;
+        // skip tiny volumes, and other volumes of the boot container (they report its numbers)
+        if total < 1 << 30 || seen.contains(&(total, free)) { continue; }
+        seen.push((total, free));
+        let path = cstr(&m.f_mntonname);
+        let name = if path == DATA_VOLUME { "Macintosh HD".to_string() } else { path.trim_start_matches("/Volumes/").to_string() };
+        if !first { o.push(','); }
+        first = false;
+        let _ = write!(o, "{{\"name\":{},\"total\":{},\"free\":{}}}", esc(&name), total, free);
     }
     o.push(']');
     o

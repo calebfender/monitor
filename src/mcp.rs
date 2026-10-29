@@ -148,7 +148,7 @@ fn tools() -> Value {
         {
             "name": "scan_disk",
             "title": "Scan disk",
-            "description": "Start a fresh disk scan in the background (1 to 3 minutes; it only reads). Call `disk` afterwards for the results.",
+            "description": "Refresh the disk scan (1 to 3 minutes; it only reads). On Linux the monitor runs it in the background; on macOS it returns the command for you to run in your own shell, because macOS would otherwise ask the user for permission repeatedly. Call `disk` afterwards.",
             "inputSchema": { "type": "object", "properties": { "machine": machine } },
             "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
         },
@@ -561,6 +561,13 @@ fn scan_disk() -> Result<String, String> {
     let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
     let script = [exe_dir, Some(cfg().dir.clone())].into_iter().flatten().map(|d| d.join("scan.py")).find(|p| p.exists())
         .ok_or("scan.py isn't installed next to the monitor. Re-run install.sh, or run scan.py from the repo.")?;
+    if cfg!(target_os = "macos") {
+        // Run from this background service, a scan makes macOS ask permission for every
+        // protected folder (Documents, Desktop, Photos, each app's data). The agent's own
+        // shell already has that access, so it runs the scan instead.
+        return Ok(format!("On macOS the scan has to run from your own shell, not from the monitor (otherwise macOS asks the user for permission over and over). Run this, then call `disk`:\n    python3 '{}' --dir '{}'\nIt only reads and takes 1 to 3 minutes.",
+            script.display(), cfg().dir.display()));
+    }
     if SCANNING.swap(true, Ordering::SeqCst) {
         return Ok("A scan is already running. Call `disk` in a minute or two.".into());
     }
@@ -579,9 +586,6 @@ fn scan_disk() -> Result<String, String> {
     });
     let last = LAST_SCAN.lock().unwrap().clone();
     let mut s = String::from("Scan started. It only reads, and takes 1 to 3 minutes; call `disk` afterwards.");
-    if cfg!(target_os = "macos") {
-        s.push_str(" On macOS, if Home comes out much smaller than expected, macOS blocked the background scan from your files: give the monitor Full Disk Access, or run scan.py from Terminal.");
-    }
     if !last.is_empty() {
         let _ = write!(s, " Previous scan: {last}");
     }
