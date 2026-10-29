@@ -22,6 +22,8 @@ mod mcp;
 const PAGE: &str = include_str!("../index.html");
 const FAVICON: &[u8] = include_bytes!("../icons/favicon.png");
 const TOUCH_ICON: &[u8] = include_bytes!("../icons/apple-touch-icon.png");
+const FONT_SANS: &[u8] = include_bytes!("../fonts/host-grotesk.woff2");
+const FONT_MONO: &[u8] = include_bytes!("../fonts/geist-mono.woff2");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const EVERY: Duration = Duration::from_secs(2);
 const RECENT: usize = 900; // 30 min of 2 s samples
@@ -508,6 +510,8 @@ fn respond(mut c: TcpStream, st: &Mutex<State>) {
         "/" | "/index.html" => ("200 OK", "text/html; charset=utf-8", PAGE.as_bytes().to_vec()),
         "/favicon.png" => ("200 OK", "image/png", FAVICON.to_vec()),
         "/apple-touch-icon.png" => ("200 OK", "image/png", TOUCH_ICON.to_vec()),
+        "/fonts/host-grotesk.woff2" => ("200 OK", "font/woff2", FONT_SANS.to_vec()),
+        "/fonts/geist-mono.woff2" => ("200 OK", "font/woff2", FONT_MONO.to_vec()),
         // MCP streamable HTTP: JSON responses only, no sessions. Browsers from other sites can't call it.
         "/mcp" if origin.as_deref().is_some_and(|o| !allowed(o)) => ("403 Forbidden", "text/plain", b"origin not allowed".to_vec()),
         "/mcp" if method == "POST" => match mcp::handle(&String::from_utf8_lossy(&body_in[..want.min(body_in.len())]), st) {
@@ -520,7 +524,8 @@ fn respond(mut c: TcpStream, st: &Mutex<State>) {
             None => ("404 Not Found", "text/plain", b"not found".to_vec()),
         },
     };
-    let mut head = format!("HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n", body.len());
+    let cache = if ctype.starts_with("font/") || ctype.starts_with("image/") { "public, max-age=86400" } else { "no-store" };
+    let mut head = format!("HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: {cache}\r\nConnection: close\r\n", body.len());
     if path == "/mcp" && status.starts_with("405") {
         head.push_str("Allow: POST\r\n");
     }
