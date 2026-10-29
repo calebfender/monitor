@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -471,17 +472,27 @@ pub fn api(path: &str, since: u64, st: &Mutex<State>) -> Option<Vec<u8>> {
     })
 }
 
+fn reply(c: &mut TcpStream, status: &str) {
+    let _ = write!(c, "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+}
+
 fn respond(mut c: TcpStream, st: &Mutex<State>) {
-    let _ = c.set_read_timeout(Some(Duration::from_secs(5)));
+    // The whole request must arrive within 10 s, however slowly the client trickles it
+    let deadline = Instant::now() + Duration::from_secs(10);
     let _ = c.set_write_timeout(Some(Duration::from_secs(10)));
+    let read = |c: &mut TcpStream, chunk: &mut [u8]| -> usize {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || c.set_read_timeout(Some(left)).is_err() { return 0; }
+        c.read(chunk).unwrap_or(0)
+    };
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
     let head_end = loop {
         if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") { break i + 4; }
-        if buf.len() > 16 << 10 { return; }
-        match c.read(&mut chunk) {
-            Ok(0) | Err(_) => break buf.len(),
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        if buf.len() > 16 << 10 { return reply(&mut c, "431 Request Header Fields Too Large"); }
+        match read(&mut c, &mut chunk) {
+            0 => break buf.len(),
+            n => buf.extend_from_slice(&chunk[..n]),
         }
     };
     let req = String::from_utf8_lossy(&buf[..head_end]).into_owned();
@@ -489,15 +500,21 @@ fn respond(mut c: TcpStream, st: &Mutex<State>) {
         let (k, v) = l.split_once(':')?;
         k.eq_ignore_ascii_case(name).then(|| v.trim().to_string())
     });
-    // request body (only /mcp uses one)
-    let want = header("content-length").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(1 << 20);
+    // request body (only /mcp uses one): exactly Content-Length bytes, at most 1 MB
+    let want = match header("content-length").map(|v| v.parse::<usize>()) {
+        None => 0,
+        Some(Ok(n)) if n <= 1 << 20 => n,
+        Some(Ok(_)) => return reply(&mut c, "413 Content Too Large"),
+        Some(Err(_)) => return reply(&mut c, "400 Bad Request"),
+    };
     let mut body_in = buf[head_end.min(buf.len())..].to_vec();
     while body_in.len() < want {
-        match c.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => body_in.extend_from_slice(&chunk[..n]),
+        match read(&mut c, &mut chunk) {
+            0 => return reply(&mut c, "400 Bad Request"),
+            n => body_in.extend_from_slice(&chunk[..n]),
         }
     }
+    body_in.truncate(want);
     let method = req.split_whitespace().next().unwrap_or("GET");
     let target = req.split_whitespace().nth(1).unwrap_or("/");
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
@@ -514,7 +531,7 @@ fn respond(mut c: TcpStream, st: &Mutex<State>) {
         "/fonts/geist-mono.woff2" => ("200 OK", "font/woff2", FONT_MONO.to_vec()),
         // MCP streamable HTTP: JSON responses only, no sessions. Browsers from other sites can't call it.
         "/mcp" if origin.as_deref().is_some_and(|o| !allowed(o)) => ("403 Forbidden", "text/plain", b"origin not allowed".to_vec()),
-        "/mcp" if method == "POST" => match mcp::handle(&String::from_utf8_lossy(&body_in[..want.min(body_in.len())]), st) {
+        "/mcp" if method == "POST" => match mcp::handle(&String::from_utf8_lossy(&body_in), st) {
             Some(r) => ("200 OK", json, r.into_bytes()),
             None => ("202 Accepted", json, Vec::new()),
         },
@@ -558,9 +575,21 @@ fn main() {
         std::process::exit(1)
     });
     eprintln!("monitor {VERSION} on http://{}:{} ({})", addr.0, addr.1, cfg().name);
-    for c in l.incoming().flatten() {
+    // One short-lived thread per request, so a slow MCP call doesn't hold up the page; at most 64 at once.
+    static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+    for mut c in l.incoming().flatten() {
+        if ACTIVE.fetch_add(1, Ordering::SeqCst) >= 64 {
+            ACTIVE.fetch_sub(1, Ordering::SeqCst);
+            reply(&mut c, "503 Service Unavailable");
+            continue;
+        }
         let st = st.clone();
-        // one short-lived thread per request, so a slow MCP call doesn't hold up the page
-        let _ = std::thread::Builder::new().stack_size(512 << 10).spawn(move || respond(c, &st));
+        let spawned = std::thread::Builder::new().stack_size(512 << 10).spawn(move || {
+            respond(c, &st);
+            ACTIVE.fetch_sub(1, Ordering::SeqCst);
+        });
+        if spawned.is_err() {
+            ACTIVE.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }

@@ -21,8 +21,15 @@ const MIB: f64 = (1u64 << 20) as f64;
 
 static SCANNING: AtomicBool = AtomicBool::new(false);
 static LAST_SCAN: Mutex<String> = Mutex::new(String::new());
-/// One-time cleanup confirmations: code -> (ids, expiry)
-static PENDING: Mutex<Vec<(String, Vec<String>, Instant)>> = Mutex::new(Vec::new());
+/// One-time cleanup confirmations: (code, ids, the exact commands shown, expiry)
+static PENDING: Mutex<Vec<(String, Vec<String>, Vec<String>, Instant)>> = Mutex::new(Vec::new());
+
+/// A random 6-digit code from the OS.
+fn random_code() -> String {
+    let mut b = [0u8; 4];
+    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b));
+    format!("{:06}", u32::from_le_bytes(b) % 1_000_000)
+}
 
 pub fn scanning() -> bool {
     SCANNING.load(Ordering::Relaxed)
@@ -40,9 +47,15 @@ pub fn handle(body: &str, st: &Mutex<State>) -> Option<String> {
         Ok(v) => v,
         Err(e) => return Some(error(Value::Null, -32700, &format!("parse error: {e}"))),
     };
+    if msg.is_array() {
+        return Some(error(Value::Null, -32600, "batches aren't supported; send one message per request"));
+    }
+    let Some(method) = msg.get("method").and_then(|m| m.as_str()).filter(|_| msg["jsonrpc"] == "2.0") else {
+        return Some(error(msg.get("id").cloned().unwrap_or(Value::Null), -32600, "invalid request"));
+    };
     let id = msg.get("id").cloned()?; // notifications (initialized, cancelled) need no answer
     let params = msg.get("params").cloned().unwrap_or(json!({}));
-    let result = match msg["method"].as_str().unwrap_or("") {
+    let result = match method {
         "initialize" => {
             let asked = params["protocolVersion"].as_str().unwrap_or("");
             let v = PROTOCOLS.iter().find(|p| **p == asked).unwrap_or(&PROTOCOLS[0]);
@@ -251,6 +264,7 @@ fn gb(bytes: f64) -> String {
 fn pct(v: f64) -> String {
     if v < 10.0 { format!("{v:.1}%") } else { format!("{v:.0}%") }
 }
+#[allow(deprecated)] // libc::time_t on musl; the cast is the same either way
 fn local(ms: u64) -> libc::tm {
     let t = (ms / 1000) as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -591,20 +605,25 @@ fn run_cleanup(args: &Value) -> Result<String, String> {
     for id in &ids {
         chosen.push(recs.iter().find(|r| r["id"].as_str() == Some(id)).ok_or_else(|| format!("No suggestion with id \"{id}\" in the last scan."))?.clone());
     }
-    let needs_sudo = |r: &Value| r["cmd"].as_str().unwrap_or("").split_whitespace().any(|w| w == "sudo");
+    // Never run here: anything needing a password, or that the scan marked as needing a terminal
+    let needs_sudo = |r: &Value| r["terminal"].as_bool() == Some(true) || r["cmd"].as_str().unwrap_or("").split_whitespace().any(|w| w == "sudo");
+    let cmds: Vec<String> = chosen.iter().map(|r| r["cmd"].as_str().unwrap_or("").to_string()).collect();
     let mut pending = PENDING.lock().unwrap();
-    pending.retain(|p| p.2 > Instant::now());
+    pending.retain(|p| p.3 > Instant::now());
 
     let Some(code) = args["confirm"].as_str().filter(|c| !c.is_empty()) else {
         // Step 1: the plan, and a one-time code for step 2
-        let code = format!("{:06}", (now_ms() ^ (std::process::id() as u64) << 20).wrapping_mul(2654435761) % 1_000_000);
-        pending.push((code.clone(), ids.clone(), Instant::now() + Duration::from_secs(600)));
+        let code = loop {
+            let c = random_code();
+            if !pending.iter().any(|p| p.0 == c) { break c; }
+        };
+        pending.push((code.clone(), ids.clone(), cmds.clone(), Instant::now() + Duration::from_secs(600)));
         let mut out = format!("Plan for {} (nothing has run yet). Show the user these exact commands and ask them to approve:\n", cfg().name);
         for r in &chosen {
             let _ = writeln!(out, "\n[{}] {} ({}, {}): {}", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""), gb(f(&r["size"])),
                 if r["group"].as_str() == Some("safe") { "safe to remove" } else { "review first" }, r["note"].as_str().unwrap_or(""));
             if needs_sudo(r) {
-                out.push_str("  Needs the user's password, so it will NOT be run here. The user must run it in a terminal:\n");
+                out.push_str("  Needs a password or a terminal, so it will NOT be run here. The user must run it themselves:\n");
             }
             for l in r["cmd"].as_str().unwrap_or("").lines() {
                 let _ = writeln!(out, "    {l}");
@@ -619,14 +638,17 @@ fn run_cleanup(args: &Value) -> Result<String, String> {
     let Some(i) = pending.iter().position(|p| p.0 == code && p.1 == ids) else {
         return Err("That confirmation code doesn't match these ids, was already used, or expired. Call run_cleanup without confirm to get a new plan.".into());
     };
-    pending.remove(i);
+    let approved = pending.remove(i);
+    if approved.2 != cmds {
+        return Err("The commands changed since the user approved them (a new disk scan finished). Nothing ran. Call run_cleanup without confirm, and show the user the new plan.".into());
+    }
     drop(pending);
     let before = plat::statvfs(plat::DATA_VOLUME).map(|d| d.1).unwrap_or(0);
     let mut out = format!("Ran on {}:\n", cfg().name);
     for r in &chosen {
         let title = r["title"].as_str().unwrap_or("");
         if needs_sudo(r) {
-            let _ = writeln!(out, "- {title}: skipped, needs the user's password. Run it in a terminal: {}", r["cmd"].as_str().unwrap_or(""));
+            let _ = writeln!(out, "- {title}: skipped, needs a password or a terminal. The user should run it themselves: {}", r["cmd"].as_str().unwrap_or(""));
             continue;
         }
         let res = run_shell(r["cmd"].as_str().unwrap_or(""), Duration::from_secs(600));
@@ -639,26 +661,39 @@ fn run_cleanup(args: &Value) -> Result<String, String> {
 }
 
 fn run_shell(cmd: &str, limit: Duration) -> String {
-    let child = Command::new("/bin/sh").arg("-c").arg(cmd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
+    use std::os::unix::process::CommandExt;
+    // Its own process group, so a timeout can stop everything it started
+    let child = Command::new("/bin/sh").arg("-c").arg(cmd).process_group(0)
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
     let mut child = match child {
         Ok(c) => c,
         Err(e) => return format!("couldn't start ({e})"),
     };
+    // Drain both pipes while it runs, so a chatty command can't block on a full pipe
+    let drain = |p: Option<Box<dyn Read + Send>>| std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(mut p) = p { let _ = p.read_to_string(&mut s); }
+        s
+    });
+    let out = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let err = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
     let start = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
             Ok(None) if start.elapsed() > limit => {
-                let _ = child.kill();
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                let _ = child.wait();
                 break None;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(200)),
             Err(_) => break None,
         }
     };
-    let mut text = String::new();
-    let _ = child.stdout.take().map(|mut o| o.read_to_string(&mut text));
-    let _ = child.stderr.take().map(|mut e| e.read_to_string(&mut text));
+    if status.is_some() {
+        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) }; // leftovers still holding the pipes
+    }
+    let text = out.join().unwrap_or_default() + &err.join().unwrap_or_default();
     let tail: String = text.trim().chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect();
     let tail = if tail.is_empty() { String::new() } else { format!(" Output: {}", tail.replace('\n', " / ")) };
     match status {

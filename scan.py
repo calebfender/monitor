@@ -178,7 +178,8 @@ def common_review(recs):
         unit = {"GB": 1e9, "MB": 1e6, "kB": 1e3, "B": 1}
         size = sum(float(v) * unit.get(u, 0) for v, u in re.findall(r"\t([\d.]+)\s*(GB|MB|kB|B)", out))
         recs.add(id="docker", group="review", title="Unused Docker data", sub="stopped containers, unused images, build cache",
-                 size=size, match=[], cmd="docker system prune", note="Asks before it removes anything. Add -a to also remove images no container uses.")
+                 size=size, match=[], cmd="docker system prune -f",
+                 note="Removes stopped containers, unused networks, dangling images and build cache. Images a container still uses stay.")
 
 
 def mac_recommendations():
@@ -187,7 +188,7 @@ def mac_recommendations():
     lib = f"{H}/Library"
     if mole and mole["total"]:
         recs.add(id="mole", group="safe", title="Caches, logs & Trash", sub="via Mole · browsers, dev tools, apps, system temp",
-                 size=mole["total"], breakdown=mole["sections"], cmd="mo clean",
+                 size=mole["total"], breakdown=mole["sections"], cmd="mo clean", terminal=True,
                  match=[f"{lib}/Caches", f"{H}/.npm", f"{H}/.Trash", f"{lib}/Logs"],
                  note="Mole's tested rules. Everything here rebuilds itself as apps need it.")
         dev_caches(recs, skip={"npm", "yarn", "pip", "gobuild"})  # Mole already counts these
