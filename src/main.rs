@@ -17,6 +17,7 @@ use mac as plat;
 mod linux;
 #[cfg(target_os = "linux")]
 use linux as plat;
+mod mcp;
 
 const PAGE: &str = include_str!("../index.html");
 const FAVICON: &[u8] = include_bytes!("../icons/favicon.png");
@@ -38,7 +39,13 @@ Usage: monitor [options]
   --allow-origin URL let a page at URL read this monitor (peers are allowed already)
   --dir PATH         where history.tsv and the disk scan (data.json) live
                      (default ~/.local/share/monitor)
+  --allow-cleanup    let MCP clients run the disk tab's cleanup commands, after
+                     a confirmation step (off by default)
   --version, --help
+
+MCP: every monitor serves an MCP endpoint at /mcp (streamable HTTP). For clients
+that only start local commands, `monitor mcp [--url URL]` bridges stdio to it
+(default http://127.0.0.1:8620).
 ";
 
 /// Command-line settings, read once at startup.
@@ -49,6 +56,7 @@ struct Config {
     peers: Vec<(String, String)>,
     origins: Vec<String>,
     dir: PathBuf,
+    allow_cleanup: bool,
 }
 static CONFIG: OnceLock<Config> = OnceLock::new();
 fn cfg() -> &'static Config {
@@ -64,6 +72,7 @@ fn parse_args() -> Config {
         peers: Vec::new(),
         origins: Vec::new(),
         dir: PathBuf::from(home).join(".local/share/monitor"),
+        allow_cleanup: false,
     };
     let fail = |m: &str| -> ! {
         eprintln!("monitor: {m}\n\n{USAGE}");
@@ -89,6 +98,7 @@ fn parse_args() -> Config {
             "--bind" => c.bind = val(),
             "--name" => c.name = val(),
             "--dir" => c.dir = PathBuf::from(val()),
+            "--allow-cleanup" => c.allow_cleanup = true,
             "--allow-origin" => c.origins.push(origin_of(&val())),
             "--peer" => {
                 let v = val();
@@ -190,7 +200,7 @@ struct Now {
     own: u64,
 }
 
-struct State {
+pub struct State {
     names: Names,
     now: Option<Now>,
     recent: VecDeque<Point>,
@@ -427,68 +437,94 @@ fn live(s: &State, since: u64) -> String {
     o
 }
 
-fn respond(mut c: TcpStream, st: &Arc<Mutex<State>>) {
-    let _ = c.set_read_timeout(Some(Duration::from_secs(3)));
-    let _ = c.set_write_timeout(Some(Duration::from_secs(10)));
-    let mut buf = [0u8; 4096];
-    let mut len = 0;
-    while len < buf.len() {
-        match c.read(&mut buf[len..]) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                len += n;
-                if buf[..len].windows(4).any(|w| w == b"\r\n\r\n") { break; }
-            }
-        }
-    }
-    let req = String::from_utf8_lossy(&buf[..len]);
-    let target = req.split_whitespace().nth(1).unwrap_or("/");
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    let origin = req.lines().find_map(|l| {
-        let (k, v) = l.split_once(':')?;
-        k.eq_ignore_ascii_case("origin").then(|| v.trim().to_string())
-    });
-    let param = |k: &str| query.split('&').find_map(|kv| kv.strip_prefix(k)?.strip_prefix('=')).unwrap_or("");
-
-    let (status, ctype, body): (&str, &str, Vec<u8>) = match path {
-        "/" | "/index.html" => ("200 OK", "text/html; charset=utf-8", PAGE.as_bytes().to_vec()),
-        "/api/live" => {
-            let s = st.lock().unwrap();
-            ("200 OK", "application/json", live(&s, param("since").parse().unwrap_or(0)).into_bytes())
-        }
+/// The JSON API, shared by HTTP and the MCP tools. None means not found.
+pub fn api(path: &str, since: u64, st: &Mutex<State>) -> Option<Vec<u8>> {
+    Some(match path {
+        "/api/live" => live(&st.lock().unwrap(), since).into_bytes(),
         "/api/day" => {
             let s = st.lock().unwrap();
             let mut o = String::from("{\"points\":");
             points_json(&mut o, &s.names, s.day.iter().copied());
             o.push('}');
-            ("200 OK", "application/json", o.into_bytes())
+            o.into_bytes()
         }
         "/api/info" => {
             let mut o = plat::info();
             let disk = cfg().dir.join("data.json").exists();
-            let _ = write!(o, ",\"diskMap\":{},\"own\":{}}}", disk, plat::own_mem());
-            ("200 OK", "application/json", o.into_bytes())
+            let _ = write!(o, ",\"diskMap\":{},\"scanning\":{},\"own\":{}}}", disk, mcp::scanning(), plat::own_mem());
+            o.into_bytes()
         }
-        "/favicon.png" => ("200 OK", "image/png", FAVICON.to_vec()),
-        "/apple-touch-icon.png" => ("200 OK", "image/png", TOUCH_ICON.to_vec()),
         "/api/config" => {
             let c = cfg();
-            let mut o = format!("{{\"version\":{},\"name\":{},\"peers\":[", esc(VERSION), esc(&c.name));
+            let mut o = format!("{{\"version\":{},\"name\":{},\"allowCleanup\":{},\"peers\":[", esc(VERSION), esc(&c.name), c.allow_cleanup);
             for (i, (n, u)) in c.peers.iter().enumerate() {
                 if i > 0 { o.push(','); }
                 let _ = write!(o, "{{\"name\":{},\"url\":{}}}", esc(n), esc(u));
             }
             o.push_str("]}");
-            ("200 OK", "application/json", o.into_bytes())
+            o.into_bytes()
         }
-        "/data.json" => match std::fs::read(cfg().dir.join("data.json")) {
-            Ok(b) => ("200 OK", "application/json", b),
-            Err(_) => ("404 Not Found", "text/plain", b"not found".to_vec()),
+        "/data.json" => std::fs::read(cfg().dir.join("data.json")).ok()?,
+        _ => return None,
+    })
+}
+
+fn respond(mut c: TcpStream, st: &Mutex<State>) {
+    let _ = c.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = c.set_write_timeout(Some(Duration::from_secs(10)));
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    let head_end = loop {
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") { break i + 4; }
+        if buf.len() > 16 << 10 { return; }
+        match c.read(&mut chunk) {
+            Ok(0) | Err(_) => break buf.len(),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    };
+    let req = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+    let header = |name: &str| req.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+    });
+    // request body (only /mcp uses one)
+    let want = header("content-length").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(1 << 20);
+    let mut body_in = buf[head_end.min(buf.len())..].to_vec();
+    while body_in.len() < want {
+        match c.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => body_in.extend_from_slice(&chunk[..n]),
+        }
+    }
+    let method = req.split_whitespace().next().unwrap_or("GET");
+    let target = req.split_whitespace().nth(1).unwrap_or("/");
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let origin = header("origin");
+    let allowed = |o: &str| cfg().origins.iter().any(|a| a == o || a == "*");
+    let param = |k: &str| query.split('&').find_map(|kv| kv.strip_prefix(k)?.strip_prefix('=')).unwrap_or("");
+
+    let json = "application/json";
+    let (status, ctype, body): (&str, &str, Vec<u8>) = match path {
+        "/" | "/index.html" => ("200 OK", "text/html; charset=utf-8", PAGE.as_bytes().to_vec()),
+        "/favicon.png" => ("200 OK", "image/png", FAVICON.to_vec()),
+        "/apple-touch-icon.png" => ("200 OK", "image/png", TOUCH_ICON.to_vec()),
+        // MCP streamable HTTP: JSON responses only, no sessions. Browsers from other sites can't call it.
+        "/mcp" if origin.as_deref().is_some_and(|o| !allowed(o)) => ("403 Forbidden", "text/plain", b"origin not allowed".to_vec()),
+        "/mcp" if method == "POST" => match mcp::handle(&String::from_utf8_lossy(&body_in[..want.min(body_in.len())]), st) {
+            Some(r) => ("200 OK", json, r.into_bytes()),
+            None => ("202 Accepted", json, Vec::new()),
         },
-        _ => ("404 Not Found", "text/plain", b"not found".to_vec()),
+        "/mcp" => ("405 Method Not Allowed", "text/plain", b"POST JSON-RPC to /mcp".to_vec()),
+        _ => match api(path, param("since").parse().unwrap_or(0), st) {
+            Some(b) => ("200 OK", json, b),
+            None => ("404 Not Found", "text/plain", b"not found".to_vec()),
+        },
     };
     let mut head = format!("HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n", body.len());
-    if let Some(o) = origin.filter(|o| cfg().origins.iter().any(|a| a == o || a == "*")) {
+    if path == "/mcp" && status.starts_with("405") {
+        head.push_str("Allow: POST\r\n");
+    }
+    if let Some(o) = origin.filter(|o| allowed(o)) {
         let _ = write!(head, "Access-Control-Allow-Origin: {o}\r\nVary: Origin\r\n");
     }
     head.push_str("\r\n");
@@ -497,6 +533,9 @@ fn respond(mut c: TcpStream, st: &Arc<Mutex<State>>) {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        mcp::stdio(std::env::args().skip(2).collect());
+    }
     let c = parse_args();
     if let Err(e) = std::fs::create_dir_all(&c.dir) {
         eprintln!("monitor: can't create {}: {e}", c.dir.display());
@@ -515,6 +554,8 @@ fn main() {
     });
     eprintln!("monitor {VERSION} on http://{}:{} ({})", addr.0, addr.1, cfg().name);
     for c in l.incoming().flatten() {
-        respond(c, &st);
+        let st = st.clone();
+        // one short-lived thread per request, so a slow MCP call doesn't hold up the page
+        let _ = std::thread::Builder::new().stack_size(512 << 10).spawn(move || respond(c, &st));
     }
 }

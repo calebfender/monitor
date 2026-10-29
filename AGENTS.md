@@ -60,6 +60,30 @@ Rules that trip people up:
 - A page served over HTTPS can't fetch an `http://` peer. Use HTTPS everywhere (`tailscale serve` does this).
 - Check from a browser on the page's origin, or: `curl -sI -H "Origin: https://a.tailnet.ts.net:8620" https://b.tailnet.ts.net:8620/api/live | grep -i access-control` should print the origin back.
 
+## 5. Connect your agents to it (MCP)
+
+Each monitor serves MCP at `/mcp`. Through one monitor you can reach every machine it peers with (tools take a `machine` argument; actions are forwarded to that machine's own monitor).
+
+```sh
+# Claude Code, on the same machine
+claude mcp add --transport http --scope user monitor http://127.0.0.1:8620/mcp
+# Claude Code, another machine on the tailnet
+claude mcp add --transport http --scope user monitor https://<machine>.<tailnet>.ts.net:8620/mcp
+# Codex
+codex mcp add monitor --url http://127.0.0.1:8620/mcp
+```
+
+Claude Desktop and other stdio-only clients: command `~/.local/share/monitor/monitor`, args `["mcp"]` (or `["mcp", "--url", "https://..."]`).
+
+Test it without a client:
+
+```sh
+curl -s http://127.0.0.1:8620/mcp -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"status","arguments":{}}}'
+```
+
+Cleanup through MCP (`run_cleanup`) is off unless the user asks for it: re-run the installer with `--allow-cleanup` added to their options. Even then every run is two calls: the first returns the exact commands and a one-time code; show the user the commands, and only call again with `confirm` after they say yes. Never invent approval.
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -69,11 +93,12 @@ Rules that trip people up:
 | A peer shows "offline" | Its URL from the page's browser, the CORS check above, and that both sides list each other |
 | No Disk tab | `ls ~/.local/share/monitor/data.json`; run the scan (step 2). With `--dir`, the scan needs the same `--dir` |
 | Disk scan slow | Huge trees (backups, snapshot folders) outside home are capped at 3 minutes each and shown as unscanned |
+| MCP client can't connect | `curl -s -X POST http://127.0.0.1:8620/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'` should print a result. A 403 means the request carried an `Origin` header that isn't a peer. Tools for a peer fail if that peer runs a monitor older than 1.1 |
 | Uninstall | `curl -fsSL .../install.sh \| sh -s -- --uninstall` (keeps data; then `rm -r ~/.local/share/monitor` to remove it) |
 
 ## Working on the code
 
-- `src/main.rs`: sampler thread, HTTP server, CLI flags, JSON API. `src/mac.rs` / `src/linux.rs`: OS readers. Only dependency: `libc`.
+- `src/main.rs`: sampler thread, HTTP server, CLI flags, JSON API. `src/mcp.rs`: MCP tools, peer forwarding, cleanup confirmation, the `monitor mcp` stdio bridge. `src/mac.rs` / `src/linux.rs`: OS readers. Dependencies: `libc`, `serde_json`.
 - `index.html` and `icons/` are compiled into the binary with `include_str!`/`include_bytes!`: rebuild after editing them.
 - `scan.py`: Python 3 standard library only. Recommendations are rules in `mac_recommendations()` / `linux_recommendations()`; each has a `group` (`safe` or `review`), the absolute paths it covers (`match`), and the shell command (`cmd`). Quote every path with `shlex.quote`.
 - Release: push a `v*` tag; `.github/workflows/release.yml` builds `monitor-macos` (universal), `monitor-linux-x86_64`, `monitor-linux-aarch64`, and attaches `scan.py` and `install.sh`. `install.sh` downloads those exact names from the latest release.

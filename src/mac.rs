@@ -9,6 +9,8 @@ use std::fmt::Write as _;
 use std::mem::{size_of, zeroed};
 
 pub const SYSTEM_NAME: &str = "macOS system";
+/// The volume that holds the user's files.
+pub const DATA_VOLUME: &str = "/System/Volumes/Data";
 
 pub struct Plat {
     host: libc::mach_port_t,

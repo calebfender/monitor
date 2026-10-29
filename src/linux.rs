@@ -8,6 +8,8 @@ use std::fs;
 use std::mem::zeroed;
 
 pub const SYSTEM_NAME: &str = "Linux kernel";
+/// The volume that holds the user's files.
+pub const DATA_VOLUME: &str = "/";
 
 pub struct Plat {
     tck: u64,
@@ -200,4 +202,12 @@ pub fn info() -> String {
     }
     o.push(']');
     o
+}
+
+/// (total, available) bytes on the filesystem holding `path`.
+pub fn statvfs(path: &str) -> Option<(u64, u64)> {
+    let c = CString::new(path).ok()?;
+    let mut s: libc::statvfs = unsafe { zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0)
+        .then(|| (s.f_blocks as u64 * s.f_frsize as u64, s.f_bavail as u64 * s.f_frsize as u64))
 }

@@ -1,9 +1,12 @@
+<img src="icons/icon.png" width="96" alt="">
+
 # Monitor
 
 A tiny, self-hosted system monitor for macOS and Linux. One binary per machine serves a web page with:
 
 - **Live**: CPU, memory, swap and memory pressure every 2 seconds, with a plain-English verdict ("Running smoothly", "Memory is tight: Chrome is using 7 GB"), 5 min / 30 min / 24 h history, and the apps using the most CPU and memory right now.
 - **Specs**: every machine side by side (model, chip, cores, memory, OS, uptime, free space on each disk).
+- **MCP**: every monitor is an MCP server, so agents can check on your machines, explain a slowdown or clean up a disk (see below).
 - **Disk**: a zoomable treemap of what's filling your disk, plus cleanup recommendations sorted into *safe to remove* and *review first*. Tick what you want and copy a script. Nothing is ever deleted from the page.
 
 Add your other machines with `--peer` and the page switches between all of them.
@@ -12,9 +15,32 @@ Add your other machines with `--peer` and the page switches between all of them.
 ![Disk view](docs/disk.png)
 ![Specs view](docs/specs.png)
 
+## For agents: MCP
+
+Every monitor is also an [MCP](https://modelcontextprotocol.io) server at `/mcp`, so your agents can ask "how are my machines doing?" or "why is my disk full?" directly. One connection covers every machine the monitor knows about.
+
+| Tool | |
+|---|---|
+| `status` | Verdict, CPU, memory, swap, pressure, uptime, disks and top apps, for one machine or all |
+| `top_apps` | Apps using the most CPU or memory right now |
+| `history` | Last 30 min or 24 h: averages, peaks, high-pressure periods, CPU spikes and the app behind each, gaps |
+| `disk` | Free space, biggest folders (drill into any folder), cleanup suggestions with exact commands |
+| `machines` | Every machine: online, specs, whether cleanup is allowed, its MCP URL |
+| `scan_disk` | Start a fresh disk scan (read-only) |
+| `run_cleanup` | Run cleanup suggestions. Off unless the monitor runs with `--allow-cleanup`; always two steps: the agent gets the exact commands and a one-time code, shows you, and only runs them with the code after you approve. Never runs `sudo` |
+
+Connect it:
+
+```sh
+claude mcp add --transport http --scope user monitor http://127.0.0.1:8620/mcp    # Claude Code
+codex mcp add monitor --url http://127.0.0.1:8620/mcp                             # Codex
+```
+
+From another machine, use its HTTPS address instead (`https://<machine>.<tailnet>.ts.net:8620/mcp`). For apps that only launch local commands (Claude Desktop), `monitor mcp [--url URL]` is a stdio bridge to a monitor's `/mcp`. `/mcp` refuses requests from web pages on other origins.
+
 ## Why it's small
 
-The monitor is about 500 KB of Rust with one dependency (`libc`). It reads the OS directly (Mach and libproc on macOS, `/proc` on Linux) instead of running `ps` or `top`, and uses about 2 MB of memory on a Mac and under 1 MB on Linux. History is kept in memory (30 min at 2 s) and in a small `history.tsv` (24 h of 1-minute averages) so it survives restarts. The page is a single HTML file compiled into the binary.
+The monitor is about 650 KB of Rust with two dependencies (`libc` and `serde_json`). It reads the OS directly (Mach and libproc on macOS, `/proc` on Linux) instead of running `ps` or `top`, and uses about 2 MB of memory on a Mac and under 1 MB on Linux. History is kept in memory (30 min at 2 s) and in a small `history.tsv` (24 h of 1-minute averages) so it survives restarts. The page is a single HTML file compiled into the binary.
 
 ## Install
 
@@ -48,6 +74,7 @@ From a checkout, with Rust installed: `./install.sh --from-source`.
 | `--peer NAME=URL` | | Another machine's monitor to show as a tab. Repeatable |
 | `--allow-origin URL` | | Let a page at another address read this monitor. Peers are allowed already |
 | `--dir PATH` | `~/.local/share/monitor` | Where `history.tsv` and the disk scan live |
+| `--allow-cleanup` | off | Let MCP clients run cleanup suggestions, after the user confirms each run |
 
 ## Several machines
 
@@ -99,6 +126,7 @@ Everything the page shows is plain JSON, if you'd rather build on it:
 | `GET /api/info` | Hardware, OS, uptime and disks |
 | `GET /api/config` | This machine's name and its peers |
 | `GET /data.json` | The latest disk scan |
+| `POST /mcp` | MCP (streamable HTTP, JSON responses) |
 
 ## Build
 
