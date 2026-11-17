@@ -7,18 +7,23 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+        # Our own machines, through local-ci (calebfender/local-ci).
+        os: [macmini, forge]
+    runs-on: [self-hosted, "${{ matrix.os }}"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      # forge's job containers start without Rust; the Mac mini already has it.
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.os == 'forge'
       - run: cargo build --release
       - name: Smoke test
         run: |
           ./target/release/monitor --version
-          ./target/release/monitor --port 8620 --dir "$RUNNER_TEMP/mon" &
+          # Not 8620: the Mac mini's own monitor is listening there.
+          ./target/release/monitor --port 18620 --dir "$RUNNER_TEMP/mon" &
           sleep 5
-          curl -fsS http://127.0.0.1:8620/api/live | python3 -c 'import json,sys; assert json.load(sys.stdin)["now"]'
-          curl -fsS http://127.0.0.1:8620/api/info >/dev/null
-          curl -fsS http://127.0.0.1:8620/ | grep -q '<title>Monitor</title>'
+          curl -fsS http://127.0.0.1:18620/api/live | python3 -c 'import json,sys; assert json.load(sys.stdin)["now"]'
+          curl -fsS http://127.0.0.1:18620/api/info >/dev/null
+          curl -fsS http://127.0.0.1:18620/ | grep -q '<title>Monitor</title>'
       - run: python3 -m py_compile scan.py
       - run: sh -n install.sh
